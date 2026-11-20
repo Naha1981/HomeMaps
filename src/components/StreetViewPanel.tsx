@@ -7,6 +7,7 @@ import {
   getPublicCoordinates,
 } from '../listingData';
 import { loadGoogleMapsScript } from '../utils';
+import { track } from '../analytics';
 
 export type StreetViewAnalyticsEvent =
   | 'street_view_open'
@@ -20,7 +21,9 @@ export type StreetViewFailureReason =
   | 'timeout';
 
 export function trackStreetViewEvent(event: StreetViewAnalyticsEvent): void {
-  console.log('[HomeAI Analytics]', event);
+  if (typeof track === 'function') {
+    track(event);
+  }
 }
 
 interface StreetViewPanelProps {

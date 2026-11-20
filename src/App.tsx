@@ -3,16 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { Bath, BedDouble, ChevronDown, ChevronUp, Compass, Loader2, Maximize2, MessageCircle } from 'lucide-react';
 import {
-  DEMO_LISTING,
   LocationPrecision,
   PropertyListing,
+  SAMPLE_LISTINGS,
   buildWhatsAppUrl,
   canShowStreetView,
 } from './listingData';
+import { track } from './analytics';
 import { getGoogleMapsApiKey } from './utils';
+import { BuyerIntentPanel } from './components/BuyerIntentPanel';
 import { PropertyLocationMap } from './components/PropertyLocationMap';
 
 const StreetViewPanel = lazy(() => import('./components/StreetViewPanel'));
@@ -27,7 +29,7 @@ export default function App() {
   const [apiKey, setApiKey] = useState<string>(getGoogleMapsApiKey);
   const [configResolved, setConfigResolved] = useState<boolean>(() => Boolean(getGoogleMapsApiKey()));
   const [quotaExceeded, setQuotaExceeded] = useState<boolean>(false);
-  const [listing, setListing] = useState<PropertyListing>(DEMO_LISTING);
+  const [listing, setListing] = useState<PropertyListing>(SAMPLE_LISTINGS[0]);
   const [isDemoControlsOpen, setIsDemoControlsOpen] = useState<boolean>(false);
   const [vibeText, setVibeText] = useState<string | null>(null);
   const [vibeLoading, setVibeLoading] = useState<boolean>(true);
@@ -37,12 +39,19 @@ export default function App() {
   const [streetViewDisabledNotice, setStreetViewDisabledNotice] = useState<string | null>(null);
 
   const streetViewAllowed = canShowStreetView(listing);
+  const hasTrackedPageViewRef = useRef(false);
+
+  useEffect(() => {
+    if (hasTrackedPageViewRef.current) return;
+    hasTrackedPageViewRef.current = true;
+    track('listing_page_view');
+  }, []);
 
   useEffect(() => {
     if (!streetViewAllowed) {
       setIsStreetViewOpen((wasOpen) => {
-        if (wasOpen) {
-          console.log('[HomeAI Analytics]', 'street_view_close');
+        if (wasOpen && typeof track === 'function') {
+          track('street_view_close');
         }
         return false;
       });
@@ -174,6 +183,7 @@ export default function App() {
               href={askWhatsAppUrl}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={() => track('whatsapp_cta_click', { button: 'ask' })}
               className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#163A2E] hover:bg-[#102B22] active:bg-[#0B2019] text-[#FFFFFF] font-semibold text-sm flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
             >
               <MessageCircle className="w-4 h-4 shrink-0 text-[#DFC58A]" aria-hidden="true" />
@@ -188,6 +198,10 @@ export default function App() {
               href={viewingWhatsAppUrl}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={() => {
+                track('whatsapp_cta_click', { button: 'viewing' });
+                track('viewing_cta_click');
+              }}
               className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#FAF8F4] hover:bg-[#EFECE3] text-[#1C221F] border border-[#C9C1B2] font-medium text-sm flex items-center justify-center transition-colors whitespace-nowrap"
             >
               Request a viewing
@@ -231,13 +245,13 @@ export default function App() {
                 <div className="flex items-center gap-1.5 rounded-lg bg-[#F5F2EB] border border-[#E3DDD1] px-2.5 py-2 min-w-0">
                   <BedDouble className="w-3.5 h-3.5 shrink-0 text-[#163A2E]" aria-hidden="true" />
                   <span className="text-xs font-medium text-[#1C221F] tabular-nums truncate">
-                    {listing.features.bedrooms} Beds
+                    {listing.features.bedrooms} {listing.features.bedrooms === 1 ? 'Bed' : 'Beds'}
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 rounded-lg bg-[#F5F2EB] border border-[#E3DDD1] px-2.5 py-2 min-w-0">
                   <Bath className="w-3.5 h-3.5 shrink-0 text-[#163A2E]" aria-hidden="true" />
                   <span className="text-xs font-medium text-[#1C221F] tabular-nums truncate">
-                    {listing.features.bathrooms} Baths
+                    {listing.features.bathrooms} {listing.features.bathrooms === 1 ? 'Bath' : 'Baths'}
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 rounded-lg bg-[#F5F2EB] border border-[#E3DDD1] px-2.5 py-2 min-w-0">
@@ -249,44 +263,17 @@ export default function App() {
               </div>
             </div>
 
-            <div className="mt-3 pt-3 border-t border-[#ECE7DC]">
-              <div className="flex items-baseline justify-between gap-2 mb-1.5">
-                <h2 className="text-xs font-semibold text-[#4B544F]">Neighborhood Vibe</h2>
-                <span className="text-[11px] text-[#6B746E]">Public area info</span>
-              </div>
-
-              {vibeLoading && (
-                <div
-                  role="status"
-                  className="flex items-center gap-2 text-xs text-[#6B746E] py-1"
-                >
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#163A2E]" aria-hidden="true" />
-                  <span>Loading area overview…</span>
+            {!vibeLoading && !vibeError && vibeText && (
+              <div className="mt-3 pt-3 border-t border-[#ECE7DC]">
+                <div className="flex items-baseline justify-between gap-2 mb-1.5">
+                  <h2 className="text-xs font-semibold text-[#4B544F]">Neighborhood Vibe</h2>
+                  <span className="text-[11px] text-[#6B746E]">Public area info</span>
                 </div>
-              )}
-
-              {!vibeLoading && vibeError && (
-                <div
-                  role="alert"
-                  className="rounded-lg bg-[#FAF5EA] border border-[#E6D6B5] px-3 py-2 text-xs text-[#5E4718] flex items-center justify-between gap-2"
-                >
-                  <span>{vibeError}</span>
-                  <button
-                    type="button"
-                    onClick={() => fetchNeighborhoodVibe()}
-                    className="shrink-0 font-semibold text-[#163A2E] underline hover:text-[#102B22] min-h-[32px] px-1"
-                  >
-                    Retry
-                  </button>
-                </div>
-              )}
-
-              {!vibeLoading && !vibeError && vibeText && (
                 <p className="text-xs sm:text-[13px] text-[#3E4641] leading-relaxed">
                   {vibeText}
                 </p>
-              )}
-            </div>
+              </div>
+            )}
 
             {streetViewAllowed && (
               <div className="mt-3 pt-3 border-t border-[#ECE7DC]">
@@ -386,12 +373,20 @@ export default function App() {
                 </p>
                 {threeDFailureReason && (
                   <p className="mt-2 pt-2 border-t border-[#E9E3D7] text-[11px] font-mono text-[#7A3E1D] break-words leading-snug">
-                    3D failure reason: {threeDFailureReason}
+                    Map diagnostic: {threeDFailureReason}
+                  </p>
+                )}
+                {vibeError && (
+                  <p className="mt-2 pt-2 border-t border-[#E9E3D7] text-[11px] font-mono text-[#7A3E1D] break-words leading-snug">
+                    Neighborhood Vibe diagnostic: {vibeError}
                   </p>
                 )}
               </div>
             )}
           </section>
+
+          {/* 5. Buyer Intent Demo Agent Panel (gated strictly on listing.isDemo === true) */}
+          {listing.isDemo === true && <BuyerIntentPanel />}
         </div>
       </main>
 

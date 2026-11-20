@@ -31,6 +31,7 @@ import {
   getViewpointCoordinates,
 } from '../listingData';
 import { getGoogleMapsApiKey, loadGoogleMapsScript } from '../utils';
+import { track } from '../analytics';
 
 interface PropertyLocationMapProps {
   listing: PropertyListing;
@@ -452,6 +453,9 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
   const circle2DRef = useRef<any>(null);
   const helpContainerRef = useRef<HTMLDivElement>(null);
   const lastSynced3DStateRef = useRef<string | null>(null);
+  const hasTrackedMapReadyRef = useRef(false);
+  const prevFullscreenRef = useRef(false);
+  const lastInteractionTrackMsRef = useRef(0);
   const on3DFailureRef = useRef(on3DFailure);
   on3DFailureRef.current = on3DFailure;
 
@@ -512,6 +516,9 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
     };
   }, []);
 
+  const MAP_UNAVAILABLE_MESSAGE =
+    "The map isn't available right now. You can still ask about this property on WhatsApp.";
+
   // React to global auth/quota failures from main.tsx
   useEffect(() => {
     if (quotaExceeded) {
@@ -519,9 +526,7 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
       console.error('[HomeAI Maps 3D Failure]', authReason);
       on3DFailureRef.current?.(authReason);
       setIsLoading(false);
-      setFatalMapError(
-        'Google Maps could not authenticate or load tiles. Check that VITE_GOOGLE_MAPS_API_KEY is valid and has Maps JavaScript API enabled.'
-      );
+      setFatalMapError(MAP_UNAVAILABLE_MESSAGE);
     }
   }, [quotaExceeded]);
 
@@ -583,9 +588,7 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
         console.error('[HomeAI Maps 3D Failure]', missingReason);
         on3DFailureRef.current?.(missingReason);
         setIsLoading(false);
-        setFatalMapError(
-          'Google Maps API key is not configured. Set VITE_GOOGLE_MAPS_API_KEY in your environment secrets or .env file.'
-        );
+        setFatalMapError(MAP_UNAVAILABLE_MESSAGE);
         return;
       }
 
@@ -686,6 +689,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
           clearTimers();
           setIsLoading(false);
           setMapReadyVersion((v) => v + 1);
+          if (!hasTrackedMapReadyRef.current) {
+            hasTrackedMapReadyRef.current = true;
+            track('map_ready', { cameraMode: 'aerial' });
+          }
         };
 
         const handleSteadyChange = (event: any) => {
@@ -754,13 +761,11 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
             : err && typeof err === 'object' && 'type' in err
               ? `Script event "${String(err.type)}" while loading Maps JS API (${stage})`
               : String(err || `Unknown 3D initialization error at stage "${stage}"`);
-        if (message.includes('VITE_GOOGLE_MAPS_API_KEY')) {
+        if (stage === 'loading-maps-js-script' || message.includes('VITE_GOOGLE_MAPS_API_KEY')) {
           console.error('[HomeAI Maps 3D Failure]', errDetail, err);
           on3DFailureRef.current?.(errDetail);
           setIsLoading(false);
-          setFatalMapError(
-            'Google Maps API key is not configured. Set VITE_GOOGLE_MAPS_API_KEY in your environment secrets or .env file.'
-          );
+          setFatalMapError(MAP_UNAVAILABLE_MESSAGE);
         } else {
           console.error('[HomeAI Maps 3D Exception]', err);
           triggerFallbackTo2D(
@@ -934,10 +939,9 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
 
       const effectiveKey = (apiKey && apiKey.trim()) || getGoogleMapsApiKey();
       if (!effectiveKey) {
+        on3DFailureRef.current?.('VITE_GOOGLE_MAPS_API_KEY is missing.');
         setIsLoading(false);
-        setFatalMapError(
-          'Google Maps API key is not configured. Set VITE_GOOGLE_MAPS_API_KEY in your environment secrets or .env file.'
-        );
+        setFatalMapError(MAP_UNAVAILABLE_MESSAGE);
         return;
       }
 
@@ -978,19 +982,19 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
         map2DRef.current = map2D;
         setMapReadyVersion((v) => v + 1);
         setIsLoading(false);
+        if (!hasTrackedMapReadyRef.current) {
+          hasTrackedMapReadyRef.current = true;
+          track('map_ready', { cameraMode: 'aerial' });
+        }
       } catch (err: any) {
         if (cancelled) return;
+        const errDetail =
+          err instanceof Error
+            ? `${err.name}: ${err.message}`
+            : String(err || 'Google Maps 2D fallback failed.');
+        on3DFailureRef.current?.(errDetail);
         setIsLoading(false);
-        const msg = err?.message || '';
-        if (msg.includes('VITE_GOOGLE_MAPS_API_KEY')) {
-          setFatalMapError(
-            'Google Maps API key is not configured. Set VITE_GOOGLE_MAPS_API_KEY in your environment secrets or .env file.'
-          );
-        } else {
-          setFatalMapError(
-            'Unable to load Google Maps. Please check your network connection and API key configuration.'
-          );
-        }
+        setFatalMapError(MAP_UNAVAILABLE_MESSAGE);
       }
     };
 
@@ -1213,6 +1217,13 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
       document.removeEventListener('pointerdown', handlePointerDown);
     };
   }, [isHelpOpen]);
+
+  // Track full-screen enter/exit strictly once per actual state transition
+  useEffect(() => {
+    if (isFullscreen === prevFullscreenRef.current) return;
+    prevFullscreenRef.current = isFullscreen;
+    track(isFullscreen ? 'full_screen_enter' : 'full_screen_exit');
+  }, [isFullscreen]);
 
   const handleToggleFullscreen = async () => {
     setActiveTooltipId(null);
@@ -1487,6 +1498,8 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
       };
     }
 
+    track('fly_to_viewpoint', { viewpointId: vp.id, cameraMode: vp.cameraMode });
+
     if (vp.cameraMode === 'ground') {
       const groundCamera = computeGroundViewpointCamera(vp);
       if (renderMode === '3d') {
@@ -1602,6 +1615,7 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
       return;
     }
     if (renderMode !== '3d' || !isExact || tourViewpoints.length <= 1) return;
+    track('tour_started');
     setTourStepIndex(0);
     setIsTourPlaying(true);
   };
@@ -1725,7 +1739,7 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
     setIsTourPlaying(false);
 
     if (isPromptInjectionAttempt(boundedText)) {
-      console.info('command_used:', 'none', 'rejected');
+      track('command_used', { action: 'none', outcome: 'rejected' });
       setCommandFeedback({ text: 'No map action taken.', isError: false });
       return;
     }
@@ -1733,13 +1747,16 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
     const deterministicMatch = parseDeterministicCommand(boundedText, listing.viewpoints);
     if (deterministicMatch) {
       const outcome = await executeAllowedAction(deterministicMatch);
-      console.info('command_used:', deterministicMatch.name, outcome.ok ? 'ok' : 'refused');
+      track('command_used', {
+        action: deterministicMatch.name,
+        outcome: outcome.ok ? 'ok' : 'refused',
+      });
       setCommandFeedback({ text: outcome.message, isError: !outcome.ok });
       return;
     }
 
     if (isPropertyOrAreaQuestion(boundedText)) {
-      console.info('command_used:', 'none', 'rejected');
+      track('command_used', { action: 'none', outcome: 'rejected' });
       redirectToWhatsAppButton();
       return;
     }
@@ -1757,7 +1774,7 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.action) {
-        console.info('command_used:', 'none', 'rejected');
+        track('command_used', { action: 'none', outcome: 'rejected' });
         if (res.status === 429 && typeof data?.error === 'string') {
           setCommandFeedback({ text: data.error, isError: true });
         } else {
@@ -1767,10 +1784,13 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
       }
 
       const outcome = await executeAllowedAction(data.action as AllowedMapAction);
-      console.info('command_used:', data.action.name, outcome.ok ? 'ok' : 'refused');
+      track('command_used', {
+        action: String(data.action.name || 'none'),
+        outcome: outcome.ok ? 'ok' : 'refused',
+      });
       setCommandFeedback({ text: outcome.message, isError: !outcome.ok });
     } catch {
-      console.info('command_used:', 'error', 'rejected');
+      track('command_used', { action: 'none', outcome: 'rejected' });
       redirectToWhatsAppButton();
     } finally {
       setIsCommandLoading(false);
@@ -1805,6 +1825,11 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
           ref={mapHostRef}
           onPointerDown={() => {
             if (isTourPlaying) setIsTourPlaying(false);
+            const now = Date.now();
+            if (now - lastInteractionTrackMsRef.current > 1500) {
+              lastInteractionTrackMsRef.current = now;
+              track('map_interaction');
+            }
           }}
           className="w-full h-full overflow-hidden"
           aria-label={
@@ -1830,6 +1855,7 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                   href={askWhatsAppUrl}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => track('whatsapp_cta_click', { button: 'ask' })}
                   className="pointer-events-auto min-h-[44px] px-3.5 py-2 rounded-xl bg-[#163A2E] hover:bg-[#102B22] active:bg-[#0B2019] text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-md border border-[#C4A052]/40 transition-colors whitespace-nowrap"
                 >
                   <MessageCircle className="w-4 h-4 shrink-0 text-[#DFC58A]" aria-hidden="true" />
@@ -1852,7 +1878,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                   label="Zoom in"
                   shortLabel="Zoom in"
                   icon={<ZoomIn className="w-4 h-4" />}
-                  onAction={handleZoomIn}
+                  onAction={() => {
+                    handleZoomIn();
+                    track('zoom_in');
+                  }}
                   isExpanded={isBarExpanded}
                   activeTooltipId={activeTooltipId}
                   setActiveTooltipId={setActiveTooltipId}
@@ -1863,7 +1892,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                   label="Zoom out"
                   shortLabel="Zoom out"
                   icon={<ZoomOut className="w-4 h-4" />}
-                  onAction={handleZoomOut}
+                  onAction={() => {
+                    handleZoomOut();
+                    track('zoom_out');
+                  }}
                   isExpanded={isBarExpanded}
                   activeTooltipId={activeTooltipId}
                   setActiveTooltipId={setActiveTooltipId}
@@ -1876,7 +1908,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                       label="Tilt up"
                       shortLabel="Tilt up"
                       icon={<ChevronUp className="w-4 h-4" />}
-                      onAction={handleTiltUp}
+                      onAction={() => {
+                        handleTiltUp();
+                        track('tilt_up');
+                      }}
                       isExpanded={isBarExpanded}
                       activeTooltipId={activeTooltipId}
                       setActiveTooltipId={setActiveTooltipId}
@@ -1886,7 +1921,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                       label="Tilt down"
                       shortLabel="Tilt down"
                       icon={<ChevronDown className="w-4 h-4" />}
-                      onAction={handleTiltDown}
+                      onAction={() => {
+                        handleTiltDown();
+                        track('tilt_down');
+                      }}
                       isExpanded={isBarExpanded}
                       activeTooltipId={activeTooltipId}
                       setActiveTooltipId={setActiveTooltipId}
@@ -1896,7 +1934,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                       label="Rotate left"
                       shortLabel="Rotate L"
                       icon={<RotateCcw className="w-4 h-4" />}
-                      onAction={handleRotateLeft}
+                      onAction={() => {
+                        handleRotateLeft();
+                        track('rotate_left');
+                      }}
                       isExpanded={isBarExpanded}
                       activeTooltipId={activeTooltipId}
                       setActiveTooltipId={setActiveTooltipId}
@@ -1906,7 +1947,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                       label="Rotate right"
                       shortLabel="Rotate R"
                       icon={<RotateCw className="w-4 h-4" />}
-                      onAction={handleRotateRight}
+                      onAction={() => {
+                        handleRotateRight();
+                        track('rotate_right');
+                      }}
                       isExpanded={isBarExpanded}
                       activeTooltipId={activeTooltipId}
                       setActiveTooltipId={setActiveTooltipId}
@@ -1919,7 +1963,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                   label="Reset view"
                   shortLabel="Reset"
                   icon={<LocateFixed className="w-4 h-4" />}
-                  onAction={handleResetView}
+                  onAction={() => {
+                    handleResetView();
+                    track('reset_view');
+                  }}
                   isExpanded={isBarExpanded}
                   activeTooltipId={activeTooltipId}
                   setActiveTooltipId={setActiveTooltipId}
@@ -1931,7 +1978,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                     label="Top-down view"
                     shortLabel="Top-down"
                     icon={<ArrowDownToLine className="w-4 h-4" />}
-                    onAction={handleTopDownView}
+                    onAction={() => {
+                      handleTopDownView();
+                      track('top_down_view');
+                    }}
                     isExpanded={isBarExpanded}
                     activeTooltipId={activeTooltipId}
                     setActiveTooltipId={setActiveTooltipId}
@@ -2127,18 +2177,27 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
           </div>
         )}
 
-        {/* Fatal map error state (e.g. missing or invalid API key) */}
+        {/* Neutral unavailable-map card (e.g. missing key, script blocked, or map error) */}
         {fatalMapError && (
           <div
-            role="alert"
-            className="absolute inset-0 z-20 flex flex-col items-center justify-center p-6 text-center bg-[#F5F2EB] text-[#1C221F]"
+            role="status"
+            className="absolute inset-0 z-20 flex flex-col items-center justify-center p-4 sm:p-6 text-center bg-[#F5F2EB] text-[#1C221F]"
           >
-            <div className="max-w-sm rounded-xl bg-[#FDFCF9] border border-[#E3DDD1] p-5 shadow-sm">
-              <AlertCircle className="w-6 h-6 text-[#9A7832] mx-auto mb-2.5" aria-hidden="true" />
-              <h2 className="text-sm font-semibold text-[#1C221F] mb-1">
-                Map could not be loaded
-              </h2>
-              <p className="text-xs text-[#4B544F] leading-relaxed">{fatalMapError}</p>
+            <div className="w-full max-w-sm rounded-xl bg-[#FDFCF9] border border-[#E3DDD1] p-4 sm:p-5 shadow-sm space-y-3">
+              <AlertCircle className="w-6 h-6 text-[#9A7832] mx-auto" aria-hidden="true" />
+              <p className="text-xs sm:text-sm text-[#3E4641] leading-relaxed">
+                {fatalMapError}
+              </p>
+              <a
+                href={askWhatsAppUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => track('whatsapp_cta_click', { button: 'ask' })}
+                className="w-full min-h-[44px] px-4 py-2 rounded-xl bg-[#163A2E] hover:bg-[#102B22] active:bg-[#0B2019] text-white font-semibold text-xs sm:text-sm inline-flex items-center justify-center gap-2 transition-colors"
+              >
+                <MessageCircle className="w-4 h-4 shrink-0 text-[#DFC58A]" aria-hidden="true" />
+                <span>Ask about this property on WhatsApp</span>
+              </a>
             </div>
           </div>
         )}
@@ -2247,6 +2306,7 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
                   href={askWhatsAppUrl}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => track('whatsapp_cta_click', { button: 'ask' })}
                   className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#163A2E] hover:bg-[#102B22] active:bg-[#0B2019] text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
                 >
                   <MessageCircle className="w-3.5 h-3.5 text-[#DFC58A]" aria-hidden="true" />
@@ -2255,6 +2315,10 @@ export const PropertyLocationMap: React.FC<PropertyLocationMapProps> = ({
               )}
             </div>
           )}
+          {/* Future Places integration hook:
+              When neighbourhood places categories/items are added in a later prompt,
+              call: if (typeof track === 'function') track('place_category_selected', { category })
+              and:  if (typeof track === 'function') track('place_selected', { category, placeId }) */}
         </div>
       )}
     </div>
